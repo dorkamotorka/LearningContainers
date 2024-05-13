@@ -5,114 +5,57 @@ import (
 	"os/exec"
 	"log"
 	"syscall"
-	//"strconv"
-	//"golang.org/x/sys/unix"
 )
 
-
-/*
-// pivotRoot will call pivot_root such that rootfs becomes the new root
-// filesystem, and everything else is cleaned up.
-func pivotRoot(rootfs string) error {
-	// While the documentation may claim otherwise, pivot_root(".", ".") is
-	// actually valid. What this results in is / being the new root but
-	// /proc/self/cwd being the old root. Since we can play around with the cwd
-	// with pivot_root this allows us to pivot without creating directories in
-	// the rootfs. Shout-outs to the LXC developers for giving us this idea.
-
-	oldroot, err := unix.Open("/", unix.O_DIRECTORY|unix.O_RDONLY, 0)
-	if err != nil {
-		return &os.PathError{Op: "open", Path: "/", Err: err}
-	}
-	defer unix.Close(oldroot) //nolint: errcheck
-
-	newroot, err := unix.Open(rootfs, unix.O_DIRECTORY|unix.O_RDONLY, 0)
-	if err != nil {
-		return &os.PathError{Op: "open", Path: rootfs, Err: err}
-	}
-	defer unix.Close(newroot) //nolint: errcheck
-
-	// Change to the new root so that the pivot_root actually acts on it.
-	if err := unix.Fchdir(newroot); err != nil {
-		return &os.PathError{Op: "fchdir", Path: "fd " + strconv.Itoa(newroot), Err: err}
+func setupNewMountNamespace(newRoot string, putOld string) {
+	// bind mount newroot to itself - this is a slight hack
+	// PIVOT_ROOT REQUIREMENT - "new_root must be a path to a mount point"
+	// MS_BIND - create a bind mount
+	// MS_REC - Apply recursively mount (action) to all submounts of the source
+	if err := syscall.Mount(newRoot, newRoot, "", syscall.MS_BIND|syscall.MS_REC, ""); err != nil {
+		log.Fatalln("failed to mount new root filesystem: ", err)
 	}
 
-	if err := unix.PivotRoot(".", "."); err != nil {
-		return &os.PathError{Op: "pivot_root", Path: ".", Err: err}
-	}
-
-	// Currently our "." is oldroot (according to the current kernel code).
-	// However, purely for safety, we will fchdir(oldroot) since there isn't
-	// really any guarantee from the kernel what /proc/self/cwd will be after a
-	// pivot_root(2).
-
-	if err := unix.Fchdir(oldroot); err != nil {
-		return &os.PathError{Op: "fchdir", Path: "fd " + strconv.Itoa(oldroot), Err: err}
-	}
-
-	// Make oldroot rslave to make sure our unmounts don't propagate to the
-	// host (and thus bork the machine). We don't use rprivate because this is
-	// known to cause issues due to races where we still have a reference to a
-	// mount while a process in the host namespace are trying to operate on
-	// something they think has no mounts (devicemapper in particular).
-	if err := mount("", ".", "", unix.MS_SLAVE|unix.MS_REC, ""); err != nil {
-		return err
-	}
-	// Perform the unmount. MNT_DETACH allows us to unmount /proc/self/cwd.
-	if err := unmount(".", unix.MNT_DETACH); err != nil {
-		return err
-	}
-
-	// Switch back to our shiny new root.
-	if err := unix.Chdir("/"); err != nil {
-		return &os.PathError{Op: "chdir", Path: "/", Err: err}
-	}
-	return nil
-}
-*/
-
-// The Linux kernel automatically removes a namespace whenever the last process that’s part of it terminates. 
-// There is a technique however to keep a namespace around by bind mounting it, even if no processes are part of it.
-func setupNewMountNamespace() {
-	newRoot := "rootfs3"
-	putOld := "/old_root" // Will and MUST be inside rootfs!
-	// 1. mount alpine root file system as a mountpoint, then it can be used to pivot_root
-	if err := syscall.Mount(newRoot, newRoot, "", syscall.MS_BIND, ""); err != nil {
-		log.Println("failed to mount new root filesystem: ", err)
-		os.Exit(1)
-	}
-
+	// create directory for old root 
+	// PIVOT_ROOT REQUIREMENT - put_old must be at or underneath new_root
 	if err := syscall.Mkdir(newRoot+putOld, 0700); err != nil {
-		log.Println("failed to mkdir: ", err)
-		os.Exit(1)
+		log.Fatalln("failed to mkdir: ", err)
 	}
-	go os.RemoveAll(putOld)
 
-	// This disassociates the current process with the namespace it is part of, 
-	// creates a fresh new mount namespace and sets it as the mount namespace for the process. 
+	// This disassociates the current process with the mount namespace it is part of, 
+	// creates a fresh new mount namespace
   if err := syscall.Unshare(syscall.CLONE_NEWNS); err != nil {
     log.Fatalf("Unshare system call failed: %v\n", err)
   }
 
+	// pivot_root to the new root filesystem
+	// NOTE: If this doesn't work, recheck the requirements in the link above
 	if err := syscall.PivotRoot(newRoot, newRoot+putOld); err != nil {
-		log.Println("failed to pivot root: ", err)
-		os.Exit(1)
+		log.Fatalln("failed to pivot root: ", err)
 	}
 
+	// change the current working directory to "/"" in the new mount namespace
 	if err := syscall.Chdir("/"); err != nil {
-		log.Println("failed to chdir to /: ", err)
-		os.Exit(1)
+		log.Fatalln("failed to chdir to /: ", err)
 	}
 
-	if err := syscall.Mount("proc", "/proc", "proc", 0, ""); err != nil {
-		log.Println("failed to mount /proc: ", err)
-		os.Exit(1)
+	// mount /proc
+	if err := syscall.Mount("/proc", "/proc", "proc", 0, ""); err != nil {
+		log.Fatalln("failed to mount /proc: ", err)
 	}
+
+	// Requires to be able to call commands like `mount` and 'readlink' below
+	if err := syscall.Mount("/dev", "/dev", "tmpfs", 0, ""); err != nil {
+		log.Fatalln("failed to mount /dev: ", err)
+	}
+	file, err := os.Create("/dev/null"); if err != nil {
+			log.Fatal(err)
+	}
+	defer file.Close()
 
 	// unmount the old root filesystem
 	if err := syscall.Unmount(putOld, syscall.MNT_DETACH); err != nil {
-		log.Println("failed to unmount the old root filesystem: ", err)
-		os.Exit(1)
+		log.Fatalln("failed to unmount the old root filesystem: ", err)
 	}
 }
 
@@ -120,18 +63,27 @@ func main() {
 	processID := os.Getpid()
 	log.Printf("Process ID: %d\n", processID)
 
+	// Check the current mount namespace
 	out, err := exec.Command("readlink", "/proc/self/ns/mnt").Output(); if err != nil {
 		log.Fatalf("Error reading namespace file: %v\n", err)
 	}
-	log.Printf("Process is now in the mount Namespace: %s", string(out))
+	log.Printf("Process is now in the old mount Namespace: %s", string(out))
 
-	setupNewMountNamespace()
+	newRoot := "new_root"
+	putOld := "/old_root"
+	setupNewMountNamespace(newRoot, putOld)
 
+	// Check the current mount namespace
+	out1, err := exec.Command("readlink", "/proc/self/ns/mnt").Output(); if err != nil {
+		log.Fatalf("Error reading namespace file: %v\n", err)
+	}
+	log.Printf("Process is now in the new mount Namespace: %s", string(out1))
+
+	log.Println("Opening a shell (bin/sh) in the new mount namespace - run commands like `mount`, 'lsns', etc.")
 	cmd := exec.Command("/bin/sh")
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-
 	if err := cmd.Run(); err != nil {
 		log.Println("failed to run the command: ", err)
 		os.Exit(1)

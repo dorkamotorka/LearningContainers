@@ -7,12 +7,11 @@ import (
 	"syscall"
 	"fmt"
 	"strconv"
-
 	"golang.org/x/sys/unix"
 )
 
-func getGockerNetNsPath() string {
-	return "/var/run/gocker/net-ns"
+func getNetNsPath() string {
+	return "/tmp/net-ns"
 }
 
 func createDirsIfDontExist(dirs []string) error {
@@ -30,8 +29,8 @@ func createDirsIfDontExist(dirs []string) error {
 // The Linux kernel automatically removes a namespace whenever the last process that’s part of it terminates. 
 // There is a technique however to keep a namespace around by bind mounting it, even if no processes are part of it.
 func setupNewNetworkNamespace(processID int) {
-  _ = createDirsIfDontExist([]string{getGockerNetNsPath()})
-  nsMount := getGockerNetNsPath() + "/" + strconv.Itoa(processID)
+  _ = createDirsIfDontExist([]string{getNetNsPath()})
+  nsMount := getNetNsPath() + "/" + strconv.Itoa(processID)
   if _, err := syscall.Open(nsMount, 
                 syscall.O_RDONLY|syscall.O_CREAT|syscall.O_EXCL,
                 0644); err != nil {
@@ -51,7 +50,7 @@ func setupNewNetworkNamespace(processID int) {
     log.Fatalf("Unshare system call failed: %v\n", err)
   }
 
-	// bind mount the (new) network namespace special file of this process to a known file name, which is /var/run/gocker/net-ns/<container-id>
+	// bind mount the (new) network namespace special file of this process to a known file name, which is /var/run//net-ns/<container-id>
 	// Such that this file can then anytime be used to refer to this network namespace.
 	// But also since in the next step with remove this process from this namespace, we want to retain (so that's why it is bind-mounted to nsMount)
   if err := syscall.Mount("/proc/self/ns/net", nsMount, 
@@ -67,12 +66,14 @@ func setupNewNetworkNamespace(processID int) {
 }
 
 func joinContainerNetworkNamespace(processID int) error {
-	nsMount := getGockerNetNsPath() + "/" + strconv.Itoa(processID)
+	nsMount := getNetNsPath() + "/" + strconv.Itoa(processID)
+	// get file descriptor of the network namespace file
 	fd, err := unix.Open(nsMount, unix.O_RDONLY, 0)
 	if err != nil {
 		log.Printf("Unable to open: %v\n", err)
 		return err
 	}
+	// sets the namespace of the current process to the one specified by the file descriptor
 	if err := unix.Setns(fd, unix.CLONE_NEWNET); err != nil {
 		log.Printf("Setns system call failed: %v\n", err)
 		return err
@@ -83,18 +84,18 @@ func joinContainerNetworkNamespace(processID int) error {
 func main () {
 	processID := os.Getpid()
 	log.Printf("Process ID: %d\n", processID)
+
 	path := fmt.Sprintf("/proc/%d/ns/net", processID)
-	out, err := exec.Command("readlink", path).Output()
-	if err != nil {
+	out, err := exec.Command("readlink", path).Output(); if err != nil {
 		log.Fatalf("Error reading namespace file: %v\n", err)
 	}
-	log.Printf("ID of the current Namespace is: %s", string(out))
+	log.Printf("Process is now in the current Namespace: %s", string(out))
 
 	setupNewNetworkNamespace(processID)
 	joinContainerNetworkNamespace(processID)
-	out2, err := exec.Command("readlink", path).Output()
-	if err != nil {
+
+	out2, err := exec.Command("readlink", path).Output(); if err != nil {
 		log.Fatalf("Error reading namespace file: %v\n", err)
 	}
-	log.Printf("ID of the new Namespace is: %s", string(out2))
+	log.Printf("Process is now in the new Namespace: %s", string(out2))
 }
