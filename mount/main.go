@@ -5,10 +5,12 @@ import (
 	"os/exec"
 	"log"
 	"syscall"
-	"strconv"
-	"golang.org/x/sys/unix"
+	//"strconv"
+	//"golang.org/x/sys/unix"
 )
 
+
+/*
 // pivotRoot will call pivot_root such that rootfs becomes the new root
 // filesystem, and everything else is cleaned up.
 func pivotRoot(rootfs string) error {
@@ -67,42 +69,78 @@ func pivotRoot(rootfs string) error {
 	}
 	return nil
 }
+*/
 
 // The Linux kernel automatically removes a namespace whenever the last process that’s part of it terminates. 
 // There is a technique however to keep a namespace around by bind mounting it, even if no processes are part of it.
-func setupNewMountNamespace(processID int) {
-	// open the processes’s network namespace file, which is in /proc/self/ns/net.
-	// This is to save the fd reference of the current namespace before we unshare (so we can set it back)
-  fd, err := syscall.Open("/proc/self/ns/net", syscall.O_RDONLY, 0)
-  defer syscall.Close(fd)
-  if err != nil {
-    log.Fatalf("Unable to open: %v\n", err)
-  }
+func setupNewMountNamespace() {
+	newRoot := "rootfs3"
+	putOld := "/old_root" // Will and MUST be inside rootfs!
+	// 1. mount alpine root file system as a mountpoint, then it can be used to pivot_root
+	if err := syscall.Mount(newRoot, newRoot, "", syscall.MS_BIND, ""); err != nil {
+		log.Println("failed to mount new root filesystem: ", err)
+		os.Exit(1)
+	}
+
+	if err := syscall.Mkdir(newRoot+putOld, 0700); err != nil {
+		log.Println("failed to mkdir: ", err)
+		os.Exit(1)
+	}
+	go os.RemoveAll(putOld)
 
 	// This disassociates the current process with the namespace it is part of, 
-	// creates a fresh new network namespace and sets it as the network namespace for the process. 
-  if err := syscall.Unshare(syscall.CLONE_NEWNET); err != nil {
+	// creates a fresh new mount namespace and sets it as the mount namespace for the process. 
+  if err := syscall.Unshare(syscall.CLONE_NEWNS); err != nil {
     log.Fatalf("Unshare system call failed: %v\n", err)
   }
 
-	// bind mount the (new) network namespace special file of this process to a known file name, which is /var/run//net-ns/<container-id>
-	// Such that this file can then anytime be used to refer to this network namespace.
-	// But also since in the next step with remove this process from this namespace, we want to retain (so that's why it is bind-mounted to nsMount)
-  if err := syscall.Mount("/proc/self/ns/net", nsMount, 
-                                "bind", syscall.MS_BIND, ""); err != nil {
-    log.Fatalf("Mount system call failed: %v\n", err)
-  }
+	/*
+	cmd := exec.Command("/bin/bash")
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 
-	// sets the namespace of the current process back to the one specified by the file descriptor obtained earlier.
-	// syscall.CLONE_NEWNET flag indicates that it's setting the network namespace.
-  if err := unix.Setns(fd, syscall.CLONE_NEWNET); err != nil {
-    log.Fatalf("Setns system call failed: %v\n", err)
-  }
+	if err := cmd.Run(); err != nil {
+		log.Println("failed to run the command: ", err)
+		os.Exit(1)
+	}
+	*/
+
+	if err := syscall.PivotRoot(newRoot, newRoot+putOld); err != nil {
+		log.Println("failed to pivot root: ", err)
+		os.Exit(1)
+	}
+
+	if err := syscall.Chdir("/"); err != nil {
+		log.Println("failed to chdir to /: ", err)
+		os.Exit(1)
+	}
+
+	if err := syscall.Mount("proc", "/proc", "proc", 0, ""); err != nil {
+		log.Println("failed to mount /proc: ", err)
+		os.Exit(1)
+	}
+
+	// unmount the old root filesystem
+	if err := syscall.Unmount(putOld, syscall.MNT_DETACH); err != nil {
+		log.Println("failed to unmount the old root filesystem: ", err)
+		os.Exit(1)
+	}
 }
 
 func main() {
+	processID := os.Getpid()
+	log.Printf("Process ID: %d\n", processID)
+
 	out, err := exec.Command("readlink", "/proc/self/ns/mnt").Output(); if err != nil {
 		log.Fatalf("Error reading namespace file: %v\n", err)
 	}
 	log.Printf("Process is now in the current Namespace: %s", string(out))
+
+	setupNewMountNamespace()
+
+	out1, err := exec.Command("readlink", "/proc/self/ns/mnt").Output(); if err != nil {
+		log.Fatalf("Error reading namespace file: %v\n", err)
+	}
+	log.Printf("Process is now in the current Namespace: %s", string(out1))
 }
