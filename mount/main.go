@@ -94,18 +94,6 @@ func setupNewMountNamespace() {
     log.Fatalf("Unshare system call failed: %v\n", err)
   }
 
-	/*
-	cmd := exec.Command("/bin/bash")
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-
-	if err := cmd.Run(); err != nil {
-		log.Println("failed to run the command: ", err)
-		os.Exit(1)
-	}
-	*/
-
 	if err := syscall.PivotRoot(newRoot, newRoot+putOld); err != nil {
 		log.Println("failed to pivot root: ", err)
 		os.Exit(1)
@@ -135,12 +123,17 @@ func main() {
 	out, err := exec.Command("readlink", "/proc/self/ns/mnt").Output(); if err != nil {
 		log.Fatalf("Error reading namespace file: %v\n", err)
 	}
-	log.Printf("Process is now in the current Namespace: %s", string(out))
+	log.Printf("Process is now in the mount Namespace: %s", string(out))
 
 	setupNewMountNamespace()
 
-	out1, err := exec.Command("readlink", "/proc/self/ns/mnt").Output(); if err != nil {
-		log.Fatalf("Error reading namespace file: %v\n", err)
+	cmd := exec.Command("/bin/sh")
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		log.Println("failed to run the command: ", err)
+		os.Exit(1)
 	}
-	log.Printf("Process is now in the current Namespace: %s", string(out1))
 }
